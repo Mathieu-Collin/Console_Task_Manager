@@ -19,6 +19,13 @@ class UIManager:
         self.message = None
         self.message_lines = []
 
+        # Cache for detecting changes
+        self._last_drawn_processes = []
+        self._last_selected_index = -1
+        self._last_scroll_offset = -1
+        self._header_drawn = False
+        self._controls_drawn = False
+
         # Initialize colors
         curses.init_pair(COLOR_NORMAL, curses.COLOR_WHITE, curses.COLOR_BLACK)
         curses.init_pair(COLOR_SELECTED, curses.COLOR_BLACK, curses.COLOR_CYAN)
@@ -46,8 +53,11 @@ class UIManager:
         except curses.error:
             pass
 
-    def draw_controls(self):
+    def draw_controls(self, force: bool = False):
         """Draw the control panel at the bottom"""
+        if self._controls_drawn and not force:
+            return  # Skip if already drawn
+
         try:
             # Draw separator line
             separator_y = self.height - 3
@@ -60,13 +70,14 @@ class UIManager:
             self.stdscr.attron(curses.color_pair(COLOR_CONTROLS))
             self.stdscr.addstr(controls_y, 0, control_text[:self.width-1].ljust(self.width-1))
             self.stdscr.attroff(curses.color_pair(COLOR_CONTROLS))
+            self._controls_drawn = True
 
         except curses.error:
             pass
 
     def draw_process_list(self, processes: List[ProcessInfo]):
         """
-        Draw the list of processes with pagination
+        Draw the list of processes with pagination (optimized with cache)
 
         Args:
             processes: List of ProcessInfo to display
@@ -80,32 +91,66 @@ class UIManager:
         elif self.selected_index >= self.scroll_offset + display_height:
             self.scroll_offset = self.selected_index - display_height + 1
 
+        # Detect what changed
+        scroll_changed = self._last_scroll_offset != self.scroll_offset
+        selection_changed = self._last_selected_index != self.selected_index
+
         # Draw only visible processes
         for i in range(display_height):
             process_index = self.scroll_offset + i
 
             if process_index >= len(processes):
-                break
+                # Clear remaining lines only if scroll changed
+                if scroll_changed or process_index < len(self._last_drawn_processes) + self._last_scroll_offset:
+                    try:
+                        self.stdscr.addstr(start_y + i, 0, " " * (self.width - 1))
+                    except curses.error:
+                        pass
+                continue
 
             process = processes[process_index]
+
+            # Check if this line needs redrawing
+            needs_redraw = False
+
+            if scroll_changed:
+                needs_redraw = True  # Redraw all on scroll
+            elif process_index == self.selected_index or process_index == self._last_selected_index:
+                needs_redraw = True  # Redraw current and previous selection
+            elif process_index - self.scroll_offset < len(self._last_drawn_processes):
+                # Check if process data changed
+                cached_index = process_index - self._last_scroll_offset
+                if 0 <= cached_index < len(self._last_drawn_processes):
+                    old_proc = self._last_drawn_processes[cached_index]
+                    if (old_proc.pid != process.pid or
+                        old_proc.cpu_percent != process.cpu_percent or
+                        old_proc.memory_mb != process.memory_mb):
+                        needs_redraw = True
+            else:
+                needs_redraw = True  # New line
+
+            if not needs_redraw:
+                continue  # Skip this line - no changes detected
+
             line = f"{process.pid:>7}  {process.name:<30}  {process.cpu_percent:>6.1f}%  {process.memory_mb:>8.1f} MB"
 
             try:
                 if process_index == self.selected_index:
+                    # Selected line: fill entire width with highlight color
                     self.stdscr.attron(curses.color_pair(COLOR_SELECTED))
                     self.stdscr.addstr(start_y + i, 0, line[:self.width-1].ljust(self.width-1))
                     self.stdscr.attroff(curses.color_pair(COLOR_SELECTED))
                 else:
-                    self.stdscr.addstr(start_y + i, 0, line[:self.width-1])
+                    # Normal line: fill entire width to clear any previous highlight
+                    self.stdscr.addstr(start_y + i, 0, line[:self.width-1].ljust(self.width-1))
             except curses.error:
                 pass
 
-        # Clear remaining lines in display area
-        for i in range(min(len(processes) - self.scroll_offset, display_height), display_height):
-            try:
-                self.stdscr.addstr(start_y + i, 0, " " * (self.width - 1))
-            except curses.error:
-                pass
+        # Update cache - store visible processes
+        visible_end = min(self.scroll_offset + display_height, len(processes))
+        self._last_drawn_processes = processes[self.scroll_offset:visible_end]
+        self._last_selected_index = self.selected_index
+        self._last_scroll_offset = self.scroll_offset
 
     def draw_message_box(self, title: str, lines: List[str]):
         """
@@ -171,6 +216,12 @@ class UIManager:
     def clear(self):
         """Clear the screen"""
         self.stdscr.clear()
+        # Reset cache when clearing
+        self._header_drawn = False
+        self._controls_drawn = False
+        self._last_drawn_processes = []
+        self._last_selected_index = -1
+        self._last_scroll_offset = -1
 
     def refresh(self):
         """Refresh the screen"""

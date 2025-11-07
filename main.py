@@ -3,12 +3,9 @@ Console Task Manager for Windows
 A htop-like task manager for Windows Command Prompt
 """
 import curses
-import time
 import sys
-import os
 from process_manager import ProcessManager
 from ui_manager import UIManager
-from config import REFRESH_INTERVAL
 
 
 class ConsoleTaskManager:
@@ -20,15 +17,14 @@ class ConsoleTaskManager:
         self.process_manager = ProcessManager()
         self.processes = []
         self.running = True
-        self.last_refresh = 0
 
     def update_processes(self, force: bool = False):
         """Update process list"""
-        current_time = time.time()
+        # Always get processes - the cache system handles update timing internally
+        if force:
+            self.process_manager.force_update()
 
-        if force or (current_time - self.last_refresh) >= REFRESH_INTERVAL:
-            self.processes = self.process_manager.get_processes(sort_by='cpu', reverse=True)
-            self.last_refresh = current_time
+        self.processes = self.process_manager.get_processes(sort_by='cpu', reverse=True)
 
     def handle_input(self):
         """Handle user input"""
@@ -74,9 +70,10 @@ class ConsoleTaskManager:
 
         win = self.ui.draw_message_box("Threads", lines)
         if win:
-            self.stdscr.nodelay(0)  # Blocking mode
-            self.stdscr.getch()  # Wait for key press
-            self.stdscr.nodelay(1)  # Back to non-blocking
+            # Use blocking mode for dialog
+            self.stdscr.timeout(-1)  # Block until key press
+            self.stdscr.getch()
+            self.stdscr.timeout(100)  # Restore timeout
 
     def kill_process(self):
         """Kill selected process"""
@@ -139,35 +136,76 @@ class ConsoleTaskManager:
 
         win = self.ui.draw_message_box("Executable Path", lines)
         if win:
-            self.stdscr.nodelay(0)
+            self.stdscr.timeout(-1)  # Block until key press
             self.stdscr.getch()
-            self.stdscr.nodelay(1)
+            self.stdscr.timeout(100)  # Restore timeout
 
     def run(self):
-        """Main application loop"""
+        """Main application loop with event-driven input handling"""
+        # Initial update and draw
+        self.update_processes()
+        self.ui.clear()  # Clear once at start
+        self.redraw_ui()
+
+        # Set timeout for getch (in milliseconds) - allows periodic updates
+        self.stdscr.timeout(50)  # 50ms timeout for ultra-responsive input
+
+        frame_count = 0
+
         while self.running:
             try:
-                # Update process list
-                self.update_processes()
+                # Get input with timeout (non-blocking with automatic refresh)
+                key = self.stdscr.getch()
 
-                # Draw UI
-                self.ui.clear()
-                self.ui.draw_header()
-                self.ui.draw_process_list(self.processes)
-                self.ui.draw_controls()
-                self.ui.refresh()
-
-                # Handle input
-                self.handle_input()
-
-                # Small sleep to prevent high CPU usage
-                time.sleep(0.05)
+                # Handle input if key was pressed
+                if key != -1:
+                    self.handle_input_key(key)
+                    # Redraw only process list for navigation (header and controls stay)
+                    self.ui.draw_process_list(self.processes)
+                    self.ui.refresh()
+                else:
+                    # Only update and redraw every 6 frames (~300ms)
+                    frame_count += 1
+                    if frame_count >= 6:
+                        self.update_processes()
+                        self.redraw_ui()
+                        frame_count = 0
+                    # else: do nothing - just wait for input
 
             except KeyboardInterrupt:
                 self.running = False
             except Exception as e:
                 # Log error and continue
                 pass
+
+    def redraw_ui(self):
+        """Redraw the user interface (optimized - only draws changed parts)"""
+        # Header and controls are drawn once, process list detects changes
+        self.ui.draw_header()
+        self.ui.draw_process_list(self.processes)
+        self.ui.draw_controls()
+        self.ui.refresh()
+
+    def handle_input_key(self, key):
+        """Handle a single key press event"""
+        # Navigation
+        if key == curses.KEY_UP:
+            self.ui.move_selection(-1, len(self.processes))
+        elif key == curses.KEY_DOWN:
+            self.ui.move_selection(1, len(self.processes))
+
+        # Actions
+        elif key in (ord('q'), ord('Q')):
+            self.running = False
+
+        elif key in (ord('t'), ord('T')):
+            self.show_threads()
+
+        elif key in (ord('k'), ord('K')):
+            self.kill_process()
+
+        elif key in (ord('e'), ord('E')):
+            self.show_exe_path()
 
 
 def main(stdscr):

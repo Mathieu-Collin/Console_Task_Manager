@@ -92,6 +92,11 @@ The application gracefully handles:
 - Permission issues
 - Zombie processes
 
+## To do next
+- CPU usage update display
+- UI optimisations for better responsiveness
+
+
 ## Future Enhancements
 
 Potential improvements:
