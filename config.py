@@ -11,6 +11,14 @@ MIN_COLS_REQUIRED = 80
 FULL_UPDATE_INTERVAL = 3.0  # Full process list update (less frequent)
 PARTIAL_UPDATE_INTERVAL = 1.0  # Fast CPU update only (less frequent)
 
+# CPU calculation mode
+# True: Normalize CPU % per core (100% = 1 core fully used)
+# False: Total CPU % across all cores (can exceed 100% on multi-core systems)
+NORMALIZE_CPU_PERCENT = True
+
+# Process filtering
+FILTER_SYSTEM_IDLE = True  # Hide "System Idle Process" (PID 0)
+
 # Process display columns
 COLUMN_WIDTHS = {
     'pid': 8,

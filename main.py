@@ -21,12 +21,21 @@ class ConsoleTaskManager:
         self.refresh_timeout_ms = int(REFRESH_INTERVAL * 1000)  # Convert to milliseconds
 
     def update_processes(self, force: bool = False):
-        """Update process list"""
+        """Update process list with visible range optimization"""
         # Always get processes - the cache system handles update timing internally
         if force:
             self.process_manager.force_update()
 
-        self.processes = self.process_manager.get_processes(sort_by='cpu', reverse=True)
+        # Calculate visible range for optimization
+        display_height = self.ui.get_display_area_height()
+        visible_start = self.ui.scroll_offset
+        visible_end = visible_start + display_height
+
+        self.processes = self.process_manager.get_processes(
+            sort_by='cpu',
+            reverse=True,
+            visible_range=(visible_start, visible_end)
+        )
 
     def handle_input(self):
         """Handle user input"""
@@ -171,9 +180,11 @@ class ConsoleTaskManager:
                 # Handle input if key was pressed - IMMEDIATE RESPONSE
                 if key != -1:
                     self.handle_input_key(key)
-                    # Redraw immediately for instant feedback
+                    # Redraw immediately for instant feedback (NO data update, just UI)
                     self.ui.draw_process_list(self.processes)
                     self.ui.refresh()
+                    # Reset frame counter to avoid immediate update after input
+                    frame_count = 0
                 else:
                     # Update data periodically (every ~1 second based on REFRESH_INTERVAL)
                     frame_count += 1

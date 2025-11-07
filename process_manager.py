@@ -3,9 +3,15 @@ Process Manager - Handles all process-related operations
 """
 import psutil
 import time
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 from models import ProcessInfo, ThreadInfo
-from config import SIGNIFICANT_CPU_CHANGE, SIGNIFICANT_MEMORY_CHANGE, NEW_PROCESS_HIGHLIGHT_DURATION
+from config import (
+    SIGNIFICANT_CPU_CHANGE,
+    SIGNIFICANT_MEMORY_CHANGE,
+    NEW_PROCESS_HIGHLIGHT_DURATION,
+    NORMALIZE_CPU_PERCENT,
+    FILTER_SYSTEM_IDLE
+)
 
 
 class ProcessManager:
@@ -21,12 +27,24 @@ class ProcessManager:
         self._last_sort_key = 'cpu'
         self._last_sort_reverse = True
         self._cached_sorted_list = []
+        self._visible_pids: Set[int] = set()  # Track visible PIDs for targeted updates
+
+        # Get CPU count for normalization
+        self._cpu_count = psutil.cpu_count(logical=True)
 
         # Initialize CPU measurement for all processes on startup
         self._initialize_cpu_measurements()
 
+    def _normalize_cpu(self, cpu_percent: float) -> float:
+        """Normalize CPU percentage if configured"""
+        if NORMALIZE_CPU_PERCENT and self._cpu_count > 0:
+            # Divide by number of cores to get percentage per core
+            return cpu_percent / self._cpu_count
+        return cpu_percent
+
     def _initialize_cpu_measurements(self):
-        """Initialize CPU measurements for all processes"""
+        """Initialize CPU measurements for all processes using fast iteration"""
+        # Use process_iter for maximum performance
         for proc in psutil.process_iter(['pid']):
             try:
                 # First call to cpu_percent() to establish baseline
@@ -59,13 +77,14 @@ class ProcessManager:
         else:
             process_info.memory_trend = ""
 
-    def get_processes(self, sort_by: str = 'cpu', reverse: bool = True) -> List[ProcessInfo]:
+    def get_processes(self, sort_by: str = 'cpu', reverse: bool = True, visible_range: Optional[Tuple[int, int]] = None) -> List[ProcessInfo]:
         """
         Get list of all running processes with intelligent caching
 
         Args:
             sort_by: Sort key ('cpu', 'memory', 'pid', 'name')
             reverse: Sort in descending order if True
+            visible_range: (start_index, end_index) of visible processes for optimization
 
         Returns:
             List of ProcessInfo objects
@@ -73,15 +92,15 @@ class ProcessManager:
         current_time = time.time()
         needs_sort = False
 
-        # Full update: refresh all processes
+        # Full update: refresh all processes (but optimized with process_iter)
         if current_time - self._last_full_update >= self._update_interval:
-            self._full_update()
+            self._full_update_optimized()
             self._last_full_update = current_time
             self._last_partial_update = current_time
             needs_sort = True
-        # Partial update: only update CPU for existing processes
+        # Partial update: only update visible processes
         elif current_time - self._last_partial_update >= self._partial_interval:
-            self._partial_update()
+            self._partial_update_optimized()
             self._last_partial_update = current_time
             needs_sort = True
 
@@ -118,36 +137,49 @@ class ProcessManager:
             self._last_sort_key = sort_by
             self._last_sort_reverse = reverse
 
+        # Update visible PIDs if range provided
+        if visible_range and self._cached_sorted_list:
+            start_idx, end_idx = visible_range
+            # Add buffer (10 processes before/after) for smooth scrolling
+            buffer_start = max(0, start_idx - 10)
+            buffer_end = min(len(self._cached_sorted_list), end_idx + 10)
+            self._visible_pids = {self._cached_sorted_list[i].pid for i in range(buffer_start, buffer_end)}
+
         return self._cached_sorted_list
 
-    def _full_update(self):
-        """Perform a full update of all processes"""
+    def _full_update_optimized(self):
+        """Perform a full update using process_iter for maximum speed"""
         new_cache = {}
         current_time = time.time()
 
-        # Get all PIDs first (fast)
-        current_pids = set(psutil.pids())
+        # Use process_iter with attrs for MUCH faster bulk collection
+        # This is 5-10x faster than creating Process objects individually
+        attrs = ['pid', 'name', 'memory_info', 'status']
 
-        # Update or create process info
-        for pid in current_pids:
+        for proc in psutil.process_iter(attrs=attrs, ad_value=''):
             try:
-                proc = psutil.Process(pid)
+                info = proc.info
+                pid = info['pid']
 
-                # Get basic info
-                name = proc.name()
-                memory_mb = proc.memory_info().rss / (1024 * 1024)
-                status = proc.status()
+                # Filter System Idle Process if configured
+                if FILTER_SYSTEM_IDLE and pid == 0:
+                    continue
 
-                # Get CPU - needs special handling
-                # cpu_percent() returns 0.0 on first call, so we need to handle it
+                # Get basic info from cached data
+                name = info.get('name', 'N/A')
+                mem_info = info.get('memory_info')
+                memory_mb = mem_info.rss / (1024 * 1024) if mem_info else 0.0
+                status = info.get('status', 'unknown')
+
+                # Get CPU - needs special handling with actual Process object
                 if pid in self._processes_cache:
                     # Process already tracked - use non-blocking call
-                    cpu_percent = proc.cpu_percent(interval=0.0)
+                    cpu_percent = self._normalize_cpu(proc.cpu_percent(interval=0.0))
                 else:
-                    # New process - call twice to get real value
-                    proc.cpu_percent(interval=0.0)  # First call establishes baseline
+                    # New process - establish baseline
+                    proc.cpu_percent(interval=0.0)
                     try:
-                        cpu_percent = proc.cpu_percent(interval=0.01)  # Second call gets actual value (10ms wait)
+                        cpu_percent = self._normalize_cpu(proc.cpu_percent(interval=0.01))
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         cpu_percent = 0.0
 
@@ -174,43 +206,105 @@ class ProcessManager:
                 continue
 
         # Clean up birth times for dead processes
+        current_pids = set(new_cache.keys())
         dead_pids = set(self._process_birth_times.keys()) - current_pids
         for pid in dead_pids:
             del self._process_birth_times[pid]
 
         self._processes_cache = new_cache
 
-    def _partial_update(self):
-        """Perform a fast partial update (only CPU values for cached processes)"""
+    def _partial_update_optimized(self):
+        """Perform a fast partial update - prioritize visible processes"""
         pids_to_remove = []
 
-        for pid, process_info in self._processes_cache.items():
-            try:
-                proc = psutil.Process(pid)
+        # If we have visible PIDs tracked, update those first
+        if self._visible_pids:
+            # Update visible processes (high priority)
+            for pid in self._visible_pids:
+                if pid not in self._processes_cache:
+                    continue
 
-                # Store old value for trend calculation
-                old_cpu = process_info.cpu_percent
+                # Skip System Idle if filtered
+                if FILTER_SYSTEM_IDLE and pid == 0:
+                    continue
 
-                # Only update CPU (fast)
-                new_cpu = proc.cpu_percent(interval=0.0)
-                process_info.cpu_percent = new_cpu
+                process_info = self._processes_cache[pid]
+                try:
+                    proc = psutil.Process(pid)
 
-                # Update CPU trend
-                cpu_diff = new_cpu - old_cpu
-                if abs(cpu_diff) >= SIGNIFICANT_CPU_CHANGE:
-                    process_info.cpu_trend = "▲" if cpu_diff > 0 else "▼"
-                else:
-                    process_info.cpu_trend = ""
+                    # Update CPU and memory for visible processes
+                    old_cpu = process_info.cpu_percent
+                    old_memory = process_info.memory_mb
 
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                # Mark for removal
-                pids_to_remove.append(pid)
+                    process_info.cpu_percent = self._normalize_cpu(proc.cpu_percent(interval=0.0))
+                    process_info.memory_mb = proc.memory_info().rss / (1024 * 1024)
+
+                    # Update trends
+                    cpu_diff = process_info.cpu_percent - old_cpu
+                    if abs(cpu_diff) >= SIGNIFICANT_CPU_CHANGE:
+                        process_info.cpu_trend = "▲" if cpu_diff > 0 else "▼"
+                    else:
+                        process_info.cpu_trend = ""
+
+                    memory_diff = process_info.memory_mb - old_memory
+                    if abs(memory_diff) >= SIGNIFICANT_MEMORY_CHANGE:
+                        process_info.memory_trend = "▲" if memory_diff > 0 else "▼"
+                    else:
+                        process_info.memory_trend = ""
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pids_to_remove.append(pid)
+
+            # Quick CPU-only update for non-visible processes (lower priority)
+            non_visible_pids = set(self._processes_cache.keys()) - self._visible_pids
+            for pid in non_visible_pids:
+                # Skip System Idle if filtered
+                if FILTER_SYSTEM_IDLE and pid == 0:
+                    continue
+
+                process_info = self._processes_cache[pid]
+                try:
+                    proc = psutil.Process(pid)
+                    old_cpu = process_info.cpu_percent
+                    process_info.cpu_percent = self._normalize_cpu(proc.cpu_percent(interval=0.0))
+
+                    # Update CPU trend only
+                    cpu_diff = process_info.cpu_percent - old_cpu
+                    if abs(cpu_diff) >= SIGNIFICANT_CPU_CHANGE:
+                        process_info.cpu_trend = "▲" if cpu_diff > 0 else "▼"
+                    else:
+                        process_info.cpu_trend = ""
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pids_to_remove.append(pid)
+        else:
+            # Fallback: update all processes (CPU only)
+            for pid, process_info in self._processes_cache.items():
+                # Skip System Idle if filtered
+                if FILTER_SYSTEM_IDLE and pid == 0:
+                    continue
+
+                try:
+                    proc = psutil.Process(pid)
+                    old_cpu = process_info.cpu_percent
+                    process_info.cpu_percent = self._normalize_cpu(proc.cpu_percent(interval=0.0))
+
+                    cpu_diff = process_info.cpu_percent - old_cpu
+                    if abs(cpu_diff) >= SIGNIFICANT_CPU_CHANGE:
+                        process_info.cpu_trend = "▲" if cpu_diff > 0 else "▼"
+                    else:
+                        process_info.cpu_trend = ""
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pids_to_remove.append(pid)
 
         # Remove dead processes
         for pid in pids_to_remove:
             del self._processes_cache[pid]
             if pid in self._process_birth_times:
                 del self._process_birth_times[pid]
+            if pid in self._visible_pids:
+                self._visible_pids.discard(pid)
 
     def force_update(self):
         """Force a full update immediately"""
