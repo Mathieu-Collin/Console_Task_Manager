@@ -5,6 +5,7 @@ import psutil
 import time
 from typing import List, Optional, Tuple, Dict
 from models import ProcessInfo, ThreadInfo
+from config import SIGNIFICANT_CPU_CHANGE, SIGNIFICANT_MEMORY_CHANGE, NEW_PROCESS_HIGHLIGHT_DURATION
 
 
 class ProcessManager:
@@ -12,6 +13,7 @@ class ProcessManager:
 
     def __init__(self):
         self._processes_cache: Dict[int, ProcessInfo] = {}  # Cache by PID
+        self._process_birth_times: Dict[int, float] = {}  # Track when processes were first seen
         self._last_full_update = 0
         self._last_partial_update = 0
         self._update_interval = 2.0  # Full update every 2 seconds
@@ -31,6 +33,31 @@ class ProcessManager:
                 proc.cpu_percent(interval=0.0)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
+
+    def _calculate_trends(self, process_info: ProcessInfo, old_info: Optional[ProcessInfo]):
+        """Calculate CPU and memory trends for a process"""
+        if old_info is None:
+            process_info.cpu_trend = ""
+            process_info.memory_trend = ""
+            return
+
+        # Update previous values
+        process_info.previous_cpu = old_info.cpu_percent
+        process_info.previous_memory = old_info.memory_mb
+
+        # CPU trend
+        cpu_diff = process_info.cpu_percent - old_info.cpu_percent
+        if abs(cpu_diff) >= SIGNIFICANT_CPU_CHANGE:
+            process_info.cpu_trend = "▲" if cpu_diff > 0 else "▼"
+        else:
+            process_info.cpu_trend = ""
+
+        # Memory trend
+        memory_diff = process_info.memory_mb - old_info.memory_mb
+        if abs(memory_diff) >= SIGNIFICANT_MEMORY_CHANGE:
+            process_info.memory_trend = "▲" if memory_diff > 0 else "▼"
+        else:
+            process_info.memory_trend = ""
 
     def get_processes(self, sort_by: str = 'cpu', reverse: bool = True) -> List[ProcessInfo]:
         """
@@ -66,6 +93,15 @@ class ProcessManager:
             # Convert cache to list and sort
             processes = list(self._processes_cache.values())
 
+            # Update "is_new" flag based on birth time
+            current_time = time.time()
+            for proc in processes:
+                if proc.pid in self._process_birth_times:
+                    age = current_time - self._process_birth_times[proc.pid]
+                    proc.is_new = age < NEW_PROCESS_HIGHLIGHT_DURATION
+                else:
+                    proc.is_new = False
+
             # Sort processes
             sort_key_map = {
                 'cpu': lambda p: p.cpu_percent,
@@ -87,6 +123,7 @@ class ProcessManager:
     def _full_update(self):
         """Perform a full update of all processes"""
         new_cache = {}
+        current_time = time.time()
 
         # Get all PIDs first (fast)
         current_pids = set(psutil.pids())
@@ -114,6 +151,12 @@ class ProcessManager:
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         cpu_percent = 0.0
 
+                    # Mark as new process
+                    self._process_birth_times[pid] = current_time
+
+                # Get old process info for trend calculation
+                old_info = self._processes_cache.get(pid)
+
                 process_info = ProcessInfo(
                     pid=pid,
                     name=name or 'N/A',
@@ -121,10 +164,19 @@ class ProcessManager:
                     memory_mb=memory_mb,
                     status=status
                 )
+
+                # Calculate trends
+                self._calculate_trends(process_info, old_info)
+
                 new_cache[pid] = process_info
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+
+        # Clean up birth times for dead processes
+        dead_pids = set(self._process_birth_times.keys()) - current_pids
+        for pid in dead_pids:
+            del self._process_birth_times[pid]
 
         self._processes_cache = new_cache
 
@@ -135,8 +187,20 @@ class ProcessManager:
         for pid, process_info in self._processes_cache.items():
             try:
                 proc = psutil.Process(pid)
+
+                # Store old value for trend calculation
+                old_cpu = process_info.cpu_percent
+
                 # Only update CPU (fast)
-                process_info.cpu_percent = proc.cpu_percent(interval=0.0)
+                new_cpu = proc.cpu_percent(interval=0.0)
+                process_info.cpu_percent = new_cpu
+
+                # Update CPU trend
+                cpu_diff = new_cpu - old_cpu
+                if abs(cpu_diff) >= SIGNIFICANT_CPU_CHANGE:
+                    process_info.cpu_trend = "▲" if cpu_diff > 0 else "▼"
+                else:
+                    process_info.cpu_trend = ""
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 # Mark for removal
@@ -145,6 +209,8 @@ class ProcessManager:
         # Remove dead processes
         for pid in pids_to_remove:
             del self._processes_cache[pid]
+            if pid in self._process_birth_times:
+                del self._process_birth_times[pid]
 
     def force_update(self):
         """Force a full update immediately"""

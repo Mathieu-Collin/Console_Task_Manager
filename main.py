@@ -6,6 +6,7 @@ import curses
 import sys
 from process_manager import ProcessManager
 from ui_manager import UIManager
+from config import REFRESH_INTERVAL
 
 
 class ConsoleTaskManager:
@@ -17,6 +18,7 @@ class ConsoleTaskManager:
         self.process_manager = ProcessManager()
         self.processes = []
         self.running = True
+        self.refresh_timeout_ms = int(REFRESH_INTERVAL * 1000)  # Convert to milliseconds
 
     def update_processes(self, force: bool = False):
         """Update process list"""
@@ -73,7 +75,7 @@ class ConsoleTaskManager:
             # Use blocking mode for dialog
             self.stdscr.timeout(-1)  # Block until key press
             self.stdscr.getch()
-            self.stdscr.timeout(100)  # Restore timeout
+            self.stdscr.timeout(self.refresh_timeout_ms)  # Restore configured timeout
 
     def kill_process(self):
         """Kill selected process"""
@@ -113,6 +115,10 @@ class ConsoleTaskManager:
                 # Force refresh
                 self.update_processes(force=True)
 
+            # Redraw UI immediately after dialog closes
+            self.ui.clear()
+            self.redraw_ui()
+
     def show_exe_path(self):
         """Show executable path for selected process"""
         if not self.processes:
@@ -138,7 +144,11 @@ class ConsoleTaskManager:
         if win:
             self.stdscr.timeout(-1)  # Block until key press
             self.stdscr.getch()
-            self.stdscr.timeout(100)  # Restore timeout
+            self.stdscr.timeout(self.refresh_timeout_ms)  # Restore configured timeout
+
+        # Redraw UI immediately after dialog closes
+        self.ui.clear()
+        self.redraw_ui()
 
     def run(self):
         """Main application loop with event-driven input handling"""
@@ -148,29 +158,29 @@ class ConsoleTaskManager:
         self.redraw_ui()
 
         # Set timeout for getch (in milliseconds) - allows periodic updates
-        self.stdscr.timeout(50)  # 50ms timeout for ultra-responsive input
+        self.stdscr.timeout(self.refresh_timeout_ms)
 
         frame_count = 0
+        frames_per_update = max(1, int(1.0 / REFRESH_INTERVAL))  # Calculate frames needed for 1s
 
         while self.running:
             try:
                 # Get input with timeout (non-blocking with automatic refresh)
                 key = self.stdscr.getch()
 
-                # Handle input if key was pressed
+                # Handle input if key was pressed - IMMEDIATE RESPONSE
                 if key != -1:
                     self.handle_input_key(key)
-                    # Redraw only process list for navigation (header and controls stay)
+                    # Redraw immediately for instant feedback
                     self.ui.draw_process_list(self.processes)
                     self.ui.refresh()
                 else:
-                    # Only update and redraw every 6 frames (~300ms)
+                    # Update data periodically (every ~1 second based on REFRESH_INTERVAL)
                     frame_count += 1
-                    if frame_count >= 6:
+                    if frame_count >= frames_per_update:
                         self.update_processes()
                         self.redraw_ui()
                         frame_count = 0
-                    # else: do nothing - just wait for input
 
             except KeyboardInterrupt:
                 self.running = False
@@ -209,37 +219,14 @@ class ConsoleTaskManager:
 
 
 def main(stdscr):
-    """Entry point for curses application"""
+    """Main entry point"""
     app = ConsoleTaskManager(stdscr)
     app.run()
 
 
-def check_terminal():
-    """Check if running in a proper terminal"""
-    # Check if stdout is redirected
-    if not sys.stdout.isatty():
-        print("Error: This application must be run in a real terminal window.", file=sys.stderr)
-        print("Please run directly from Command Prompt or PowerShell.", file=sys.stderr)
-        return False
-    return True
-
-
-if __name__ == '__main__':
-    # Check terminal before starting
-    if not check_terminal():
-        sys.exit(1)
-
+if __name__ == "__main__":
     try:
-        # Initialize curses with error handling
         curses.wrapper(main)
-    except curses.error as e:
-        print(f"\nCurses Error: {e}", file=sys.stderr)
-        print("\nPlease ensure you are running this in a standard terminal.", file=sys.stderr)
-        print("Try running: python main.py", file=sys.stderr)
-        sys.exit(1)
     except KeyboardInterrupt:
-        print("\nApplication terminated by user.")
+        print("\nExiting...")
         sys.exit(0)
-    except Exception as e:
-        print(f"\nUnexpected Error: {e}", file=sys.stderr)
-        sys.exit(1)

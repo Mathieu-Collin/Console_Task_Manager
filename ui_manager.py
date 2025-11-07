@@ -32,11 +32,29 @@ class UIManager:
         curses.init_pair(COLOR_HEADER, curses.COLOR_BLACK, curses.COLOR_WHITE)
         curses.init_pair(COLOR_CONTROLS, curses.COLOR_BLACK, curses.COLOR_GREEN)
         curses.init_pair(COLOR_ERROR, curses.COLOR_RED, curses.COLOR_BLACK)
+        curses.init_pair(COLOR_NEW_PROCESS, curses.COLOR_GREEN, curses.COLOR_BLACK)
+        curses.init_pair(COLOR_HIGH_CPU, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+        curses.init_pair(COLOR_VERY_HIGH_CPU, curses.COLOR_RED, curses.COLOR_BLACK)
 
         # Configure curses
         curses.curs_set(0)  # Hide cursor
         self.stdscr.nodelay(1)  # Non-blocking input
         self.stdscr.keypad(1)  # Enable keypad
+
+    def _get_process_color(self, process: ProcessInfo, is_selected: bool) -> int:
+        """Determine the color pair for a process based on its state"""
+        if is_selected:
+            return COLOR_SELECTED
+
+        # Priority: new process > very high CPU > high CPU > normal
+        if process.is_new:
+            return COLOR_NEW_PROCESS
+        elif process.cpu_percent >= VERY_HIGH_CPU_THRESHOLD:
+            return COLOR_VERY_HIGH_CPU
+        elif process.cpu_percent >= HIGH_CPU_THRESHOLD:
+            return COLOR_HIGH_CPU
+        else:
+            return COLOR_NORMAL
 
     def get_display_area_height(self) -> int:
         """Calculate available height for process list (excluding header and controls)"""
@@ -46,7 +64,7 @@ class UIManager:
     def draw_header(self):
         """Draw the header with column titles"""
         try:
-            header = f"{'PID':>7}  {'Process Name':<30}  {'CPU %':>6}  {'Memory':>10}"
+            header = f"{'PID':>7}  {'Process Name':<30}  {'CPU %':>7}  {'Memory':>11}"
             self.stdscr.attron(curses.color_pair(COLOR_HEADER))
             self.stdscr.addstr(0, 0, header[:self.width-1].ljust(self.width-1))
             self.stdscr.attroff(curses.color_pair(COLOR_HEADER))
@@ -77,7 +95,7 @@ class UIManager:
 
     def draw_process_list(self, processes: List[ProcessInfo]):
         """
-        Draw the list of processes with pagination (optimized with cache)
+        Draw the list of processes with pagination and smart coloring (optimized with cache)
 
         Args:
             processes: List of ProcessInfo to display
@@ -124,7 +142,10 @@ class UIManager:
                     old_proc = self._last_drawn_processes[cached_index]
                     if (old_proc.pid != process.pid or
                         old_proc.cpu_percent != process.cpu_percent or
-                        old_proc.memory_mb != process.memory_mb):
+                        old_proc.memory_mb != process.memory_mb or
+                        old_proc.is_new != process.is_new or
+                        old_proc.cpu_trend != process.cpu_trend or
+                        old_proc.memory_trend != process.memory_trend):
                         needs_redraw = True
             else:
                 needs_redraw = True  # New line
@@ -132,23 +153,26 @@ class UIManager:
             if not needs_redraw:
                 continue  # Skip this line - no changes detected
 
-            line = f"{process.pid:>7}  {process.name:<30}  {process.cpu_percent:>6.1f}%  {process.memory_mb:>8.1f} MB"
+            # Build the line with indicators
+            cpu_indicator = process.cpu_trend if process.cpu_trend else " "
+            mem_indicator = process.memory_trend if process.memory_trend else " "
+            line = f"{process.pid:>7}  {process.name:<30}  {process.cpu_percent:>6.1f}%{cpu_indicator}  {process.memory_mb:>8.1f}{mem_indicator} MB"
 
             try:
-                if process_index == self.selected_index:
-                    # Selected line: fill entire width with highlight color
-                    self.stdscr.attron(curses.color_pair(COLOR_SELECTED))
-                    self.stdscr.addstr(start_y + i, 0, line[:self.width-1].ljust(self.width-1))
-                    self.stdscr.attroff(curses.color_pair(COLOR_SELECTED))
-                else:
-                    # Normal line: fill entire width to clear any previous highlight
-                    self.stdscr.addstr(start_y + i, 0, line[:self.width-1].ljust(self.width-1))
+                is_selected = (process_index == self.selected_index)
+                color_pair = self._get_process_color(process, is_selected)
+
+                # Apply color and draw
+                self.stdscr.attron(curses.color_pair(color_pair))
+                self.stdscr.addstr(start_y + i, 0, line[:self.width-1].ljust(self.width-1))
+                self.stdscr.attroff(curses.color_pair(color_pair))
+
             except curses.error:
                 pass
 
         # Update cache - store visible processes
         visible_end = min(self.scroll_offset + display_height, len(processes))
-        self._last_drawn_processes = processes[self.scroll_offset:visible_end]
+        self._last_drawn_processes = processes[self.scroll_offset:visible_end].copy()
         self._last_selected_index = self.selected_index
         self._last_scroll_offset = self.scroll_offset
 

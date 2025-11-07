@@ -25,6 +25,16 @@ COLOR_SELECTED = 2
 COLOR_HEADER = 3
 COLOR_CONTROLS = 4
 COLOR_ERROR = 5
+COLOR_NEW_PROCESS = 6  # Green for new processes
+COLOR_HIGH_CPU = 7  # Yellow for high CPU usage
+COLOR_VERY_HIGH_CPU = 8  # Red for very high CPU usage
+
+# Thresholds for highlighting
+HIGH_CPU_THRESHOLD = 50.0  # Yellow above 50%
+VERY_HIGH_CPU_THRESHOLD = 80.0  # Red above 80%
+SIGNIFICANT_CPU_CHANGE = 10.0  # Show trend indicator if change > 10%
+SIGNIFICANT_MEMORY_CHANGE = 50.0  # Show trend indicator if change > 50 MB
+NEW_PROCESS_HIGHLIGHT_DURATION = 5  # seconds to highlight new processes
 
 # Controls
 CONTROLS = [
