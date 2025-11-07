@@ -31,10 +31,14 @@ class ConsoleTaskManager:
         visible_start = self.ui.scroll_offset
         visible_end = visible_start + display_height
 
+        # Get search query from UI
+        search_query = self.ui.get_search_query()
+
         self.processes = self.process_manager.get_processes(
             sort_by='cpu',
             reverse=True,
-            visible_range=(visible_start, visible_end)
+            visible_range=(visible_start, visible_end),
+            search_query=search_query
         )
 
     def handle_input(self):
@@ -63,6 +67,13 @@ class ConsoleTaskManager:
         elif key in (ord('e'), ord('E')):
             self.show_exe_path()
 
+        elif key in (ord('r'), ord('R')):  # Start search with R key
+            self.start_search()
+
+        elif key == 27:  # ESC key - clear search
+            if self.ui.get_search_query():
+                self.clear_search()
+
     def show_threads(self):
         """Show threads for selected process"""
         if not self.processes:
@@ -86,47 +97,26 @@ class ConsoleTaskManager:
             self.stdscr.getch()
             self.stdscr.timeout(self.refresh_timeout_ms)  # Restore configured timeout
 
+        # Redraw UI after dialog closes
+        self.ui.clear()
+        self.redraw_ui()
+
     def kill_process(self):
-        """Kill selected process"""
+        """Kill selected process immediately without confirmation"""
         if not self.processes:
             return
 
         selected_process = self.processes[self.ui.get_selected_index()]
 
-        # Show confirmation
-        lines = [
-            f"Kill process: {selected_process.name}?",
-            f"PID: {selected_process.pid}",
-            "",
-            "Press 'Y' to confirm, any other key to cancel"
-        ]
+        # Kill process directly without confirmation
+        success, error = self.process_manager.kill_process(selected_process.pid)
 
-        win = self.ui.draw_message_box("Confirm Kill", lines)
-        if win:
-            self.stdscr.nodelay(0)
-            key = self.stdscr.getch()
-            self.stdscr.nodelay(1)
+        # Force refresh to update the list
+        self.update_processes(force=True)
 
-            if key in (ord('y'), ord('Y')):
-                success, error = self.process_manager.kill_process(selected_process.pid)
-
-                if success:
-                    result_lines = ["Process terminated successfully"]
-                else:
-                    result_lines = [f"Failed to kill process:", "", f"{error}"]
-
-                win2 = self.ui.draw_message_box("Result", result_lines)
-                if win2:
-                    self.stdscr.nodelay(0)
-                    self.stdscr.getch()
-                    self.stdscr.nodelay(1)
-
-                # Force refresh
-                self.update_processes(force=True)
-
-            # Redraw UI immediately after dialog closes
-            self.ui.clear()
-            self.redraw_ui()
+        # Redraw UI immediately after process kill
+        self.ui.clear()
+        self.redraw_ui()
 
     def show_exe_path(self):
         """Show executable path for selected process"""
@@ -180,9 +170,11 @@ class ConsoleTaskManager:
                 # Handle input if key was pressed - IMMEDIATE RESPONSE
                 if key != -1:
                     self.handle_input_key(key)
-                    # Redraw immediately for instant feedback (NO data update, just UI)
-                    self.ui.draw_process_list(self.processes)
-                    self.ui.refresh()
+                    # Update processes if search query changed
+                    if self.ui.is_search_active() or self.ui.get_search_query():
+                        self.update_processes()
+                    # Redraw immediately for instant feedback
+                    self.redraw_ui()
                     # Reset frame counter to avoid immediate update after input
                     frame_count = 0
                 else:
@@ -201,14 +193,28 @@ class ConsoleTaskManager:
 
     def redraw_ui(self):
         """Redraw the user interface (optimized - only draws changed parts)"""
+        # Draw system stats first
+        self.ui.draw_system_stats()
         # Header and controls are drawn once, process list detects changes
         self.ui.draw_header()
+        # Draw search bar if active
+        self.ui.draw_search_bar()
         self.ui.draw_process_list(self.processes)
         self.ui.draw_controls()
         self.ui.refresh()
 
     def handle_input_key(self, key):
         """Handle a single key press event"""
+        # If in search mode, handle search input
+        if self.ui.is_search_active():
+            continue_search = self.ui.handle_search_input(key)
+            if not continue_search:
+                # Search ended, reset selection and update processes
+                self.ui.reset_selection()
+                self.update_processes()
+            return
+
+        # Normal mode input handling
         # Navigation
         if key == curses.KEY_UP:
             self.ui.move_selection(-1, len(self.processes))
@@ -228,6 +234,21 @@ class ConsoleTaskManager:
         elif key in (ord('e'), ord('E')):
             self.show_exe_path()
 
+        elif key in (ord('r'), ord('R')):  # Start search with R key
+            self.start_search()
+
+        elif key == 27:  # ESC key - clear search
+            if self.ui.get_search_query():
+                self.clear_search()
+
+    def start_search(self):
+        """Start search mode"""
+        self.ui.start_search()
+
+    def clear_search(self):
+        """Clear search and return to normal mode"""
+        self.ui.stop_search()
+        self.update_processes()
 
 def main(stdscr):
     """Main entry point"""

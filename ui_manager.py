@@ -2,6 +2,7 @@
 UI Manager - Handles all user interface operations using curses
 """
 import curses
+import psutil
 from typing import List
 from models import ProcessInfo
 from config import *
@@ -15,9 +16,14 @@ class UIManager:
         self.height, self.width = stdscr.getmaxyx()
         self.selected_index = 0
         self.scroll_offset = 0
-        self.mode = 'normal'  # 'normal', 'threads', 'message'
+        self.mode = 'normal'  # 'normal', 'threads', 'message', 'search'
         self.message = None
         self.message_lines = []
+
+        # Search functionality
+        self.search_active = False
+        self.search_query = ""
+        self.search_cursor_pos = 0
 
         # Cache for detecting changes
         self._last_drawn_processes = []
@@ -35,6 +41,7 @@ class UIManager:
         curses.init_pair(COLOR_NEW_PROCESS, curses.COLOR_GREEN, curses.COLOR_BLACK)
         curses.init_pair(COLOR_HIGH_CPU, curses.COLOR_YELLOW, curses.COLOR_BLACK)
         curses.init_pair(COLOR_VERY_HIGH_CPU, curses.COLOR_RED, curses.COLOR_BLACK)
+        curses.init_pair(COLOR_SEARCH_BAR, curses.COLOR_BLACK, curses.COLOR_YELLOW)
 
         # Configure curses
         curses.curs_set(0)  # Hide cursor
@@ -57,16 +64,72 @@ class UIManager:
             return COLOR_NORMAL
 
     def get_display_area_height(self) -> int:
-        """Calculate available height for process list (excluding header and controls)"""
-        # 1 line header + 1 blank + processes + 1 blank + 2 controls
-        return max(self.height - 5, 10)
+        """Calculate available height for process list (excluding header, system stats and controls)"""
+        # Account for search bar when active
+        search_offset = 1 if self.search_active else 0
+        # 2 lines system stats + 1 line header + 1 blank + search bar (if active) + processes + 1 blank + 2 controls
+        return max(self.height - 7 - search_offset, 10)
+
+    def draw_system_stats(self):
+        """Draw system-wide CPU and memory statistics"""
+        try:
+            # Get system stats
+            cpu_percent = psutil.cpu_percent(interval=0)
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
+            memory_used_gb = memory.used / (1024 ** 3)
+            memory_total_gb = memory.total / (1024 ** 3)
+
+            # Line 1: CPU info
+            cpu_line = f"CPU: {cpu_percent:5.1f}% "
+
+            # Add visual bar for CPU (20 chars wide)
+            bar_width = 20
+            filled = int((cpu_percent / 100) * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            cpu_line += f"[{bar}]"
+
+            # Determine CPU color
+            if cpu_percent >= 80:
+                cpu_color = COLOR_VERY_HIGH_CPU
+            elif cpu_percent >= 50:
+                cpu_color = COLOR_HIGH_CPU
+            else:
+                cpu_color = COLOR_NORMAL
+
+            self.stdscr.attron(curses.color_pair(cpu_color))
+            self.stdscr.addstr(0, 0, cpu_line[:self.width-1].ljust(self.width-1))
+            self.stdscr.attroff(curses.color_pair(cpu_color))
+
+            # Line 2: Memory info
+            mem_line = f"MEM: {memory_percent:5.1f}% ({memory_used_gb:.1f}GB / {memory_total_gb:.1f}GB) "
+
+            # Add visual bar for Memory
+            filled = int((memory_percent / 100) * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            mem_line += f"[{bar}]"
+
+            # Determine memory color
+            if memory_percent >= 80:
+                mem_color = COLOR_VERY_HIGH_CPU
+            elif memory_percent >= 50:
+                mem_color = COLOR_HIGH_CPU
+            else:
+                mem_color = COLOR_NORMAL
+
+            self.stdscr.attron(curses.color_pair(mem_color))
+            self.stdscr.addstr(1, 0, mem_line[:self.width-1].ljust(self.width-1))
+            self.stdscr.attroff(curses.color_pair(mem_color))
+
+        except curses.error:
+            pass
 
     def draw_header(self):
         """Draw the header with column titles"""
         try:
             header = f"{'PID':>7}  {'Process Name':<30}  {'CPU %':>7}  {'Memory':>11}"
             self.stdscr.attron(curses.color_pair(COLOR_HEADER))
-            self.stdscr.addstr(0, 0, header[:self.width-1].ljust(self.width-1))
+            self.stdscr.addstr(2, 0, header[:self.width-1].ljust(self.width-1))
             self.stdscr.attroff(curses.color_pair(COLOR_HEADER))
         except curses.error:
             pass
@@ -101,7 +164,8 @@ class UIManager:
             processes: List of ProcessInfo to display
         """
         display_height = self.get_display_area_height()
-        start_y = 2  # After header and blank line
+        # Adjust start_y based on whether search is active
+        start_y = 4 if not self.search_active else 5  # After system stats + header + blank + search bar (if active)
 
         # Adjust scroll offset if needed
         if self.selected_index < self.scroll_offset:
@@ -213,6 +277,33 @@ class UIManager:
         except curses.error:
             return None
 
+    def draw_search_bar(self):
+        """Draw the search bar at the top of the process list"""
+        if not self.search_active:
+            return
+
+        try:
+            # Search bar background
+            self.stdscr.attron(curses.color_pair(COLOR_SEARCH_BAR))
+            self.stdscr.addstr(3, 0, " " * (self.width - 1))
+            self.stdscr.attroff(curses.color_pair(COLOR_SEARCH_BAR))
+
+            # Search prompt
+            prompt = "Search: "
+            self.stdscr.addstr(3, 2, prompt)
+
+            # Search query
+            query_y = 3
+            query_x = len(prompt) + 2
+            self.stdscr.addstr(query_y, query_x, self.search_query.ljust(self.width - query_x - 1))
+
+            # Draw cursor at the end of the query
+            cursor_x = query_x + len(self.search_query)
+            self.stdscr.move(query_y, cursor_x)
+
+        except curses.error:
+            pass
+
     def move_selection(self, direction: int, total_items: int):
         """
         Move the selection up or down
@@ -254,3 +345,57 @@ class UIManager:
     def get_input(self) -> int:
         """Get user input (non-blocking)"""
         return self.stdscr.getch()
+
+    def start_search(self):
+        """Activate search mode"""
+        self.search_active = True
+        self.search_query = ""
+        self.search_cursor_pos = 0
+        self.mode = 'search'
+        curses.curs_set(1)  # Show cursor during search
+
+    def stop_search(self):
+        """Deactivate search mode"""
+        self.search_active = False
+        self.search_query = ""
+        self.search_cursor_pos = 0
+        self.mode = 'normal'
+        curses.curs_set(0)  # Hide cursor
+        self.reset_selection()
+
+    def handle_search_input(self, key: int) -> bool:
+        """
+        Handle input while in search mode
+
+        Args:
+            key: The key pressed
+
+        Returns:
+            True if search should continue, False if it should exit
+        """
+        if key == 27:  # ESC key
+            return False
+        elif key == 10 or key == 13:  # Enter key - exit search but keep query
+            curses.curs_set(0)  # Hide cursor
+            self.mode = 'normal'
+            return False
+        elif key == curses.KEY_BACKSPACE or key == 8 or key == 127:
+            # Backspace - remove last character
+            if self.search_query:
+                self.search_query = self.search_query[:-1]
+                self.search_cursor_pos = len(self.search_query)
+        elif 32 <= key <= 126:  # Printable ASCII characters
+            # Add character to search query
+            if len(self.search_query) < MAX_SEARCH_LENGTH:
+                self.search_query += chr(key)
+                self.search_cursor_pos = len(self.search_query)
+
+        return True
+
+    def get_search_query(self) -> str:
+        """Get the current search query"""
+        return self.search_query
+
+    def is_search_active(self) -> bool:
+        """Check if search mode is active"""
+        return self.search_active

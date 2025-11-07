@@ -77,14 +77,15 @@ class ProcessManager:
         else:
             process_info.memory_trend = ""
 
-    def get_processes(self, sort_by: str = 'cpu', reverse: bool = True, visible_range: Optional[Tuple[int, int]] = None) -> List[ProcessInfo]:
+    def get_processes(self, sort_by: str = 'cpu', reverse: bool = True, visible_range: Optional[Tuple[int, int]] = None, search_query: str = "") -> List[ProcessInfo]:
         """
-        Get list of all running processes with intelligent caching
+        Get list of all running processes with intelligent caching and optional filtering
 
         Args:
             sort_by: Sort key ('cpu', 'memory', 'pid', 'name')
             reverse: Sort in descending order if True
             visible_range: (start_index, end_index) of visible processes for optimization
+            search_query: Filter processes by name (case-insensitive partial match)
 
         Returns:
             List of ProcessInfo objects
@@ -109,8 +110,16 @@ class ProcessManager:
             self._last_sort_reverse != reverse or
             needs_sort):
 
-            # Convert cache to list and sort
+            # Convert cache to list
             processes = list(self._processes_cache.values())
+
+            # Apply search filter if provided
+            if search_query.strip():
+                search_lower = search_query.lower().strip()
+                processes = [
+                    proc for proc in processes
+                    if search_lower in proc.name.lower()
+                ]
 
             # Update "is_new" flag based on birth time
             current_time = time.time()
@@ -136,6 +145,16 @@ class ProcessManager:
             self._cached_sorted_list = processes
             self._last_sort_key = sort_by
             self._last_sort_reverse = reverse
+
+        # If we have a search query, we need to re-filter the cached list
+        elif search_query.strip():
+            search_lower = search_query.lower().strip()
+            processes = [
+                proc for proc in self._cached_sorted_list
+                if search_lower in proc.name.lower()
+            ]
+            # Don't cache filtered results, return them directly
+            return processes
 
         # Update visible PIDs if range provided
         if visible_range and self._cached_sorted_list:

@@ -36,6 +36,7 @@ COLOR_ERROR = 5
 COLOR_NEW_PROCESS = 6  # Green for new processes
 COLOR_HIGH_CPU = 7  # Yellow for high CPU usage
 COLOR_VERY_HIGH_CPU = 8  # Red for very high CPU usage
+COLOR_SEARCH_BAR = 9  # Color for search bar
 
 # Thresholds for highlighting
 HIGH_CPU_THRESHOLD = 50.0  # Yellow above 50%
@@ -50,5 +51,11 @@ CONTROLS = [
     ('T', 'Threads'),
     ('K', 'Kill'),
     ('E', 'Exe Path'),
+    ('R', 'Search'),
+    ('ESC', 'Clear Search'),
     ('Q', 'Quit'),
 ]
+
+# Search settings
+SEARCH_PROMPT = "Search processes: "
+MAX_SEARCH_LENGTH = 50
