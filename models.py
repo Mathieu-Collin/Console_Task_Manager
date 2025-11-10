@@ -15,8 +15,17 @@ class ProcessInfo:
     exe_path: Optional[str] = None
     status: Optional[str] = None
 
+    # Tracking fields for UI enhancements
+    is_new: bool = False  # Process appeared recently
+    cpu_trend: str = ""  # "▲" increasing, "▼" decreasing, "" stable
+    memory_trend: str = ""  # "▲" increasing, "▼" decreasing, "" stable
+    previous_cpu: Optional[float] = None
+    previous_memory: Optional[float] = None
+
     def __str__(self) -> str:
-        return f"{self.pid:>7}  {self.name:<30}  {self.cpu_percent:>6.1f}%  {self.memory_mb:>8.1f} MB"
+        cpu_indicator = self.cpu_trend if self.cpu_trend else " "
+        mem_indicator = self.memory_trend if self.memory_trend else " "
+        return f"{self.pid:>7}  {self.name:<30}  {self.cpu_percent:>6.1f}%{cpu_indicator}  {self.memory_mb:>8.1f}{mem_indicator} MB"
 
 
 @dataclass
@@ -28,4 +37,3 @@ class ThreadInfo:
 
     def __str__(self) -> str:
         return f"  Thread {self.thread_id:>7}  User: {self.user_time:.2f}s  System: {self.system_time:.2f}s"
-
